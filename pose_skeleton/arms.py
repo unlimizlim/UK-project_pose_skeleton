@@ -59,6 +59,17 @@ COLLAPSE_RATIO = 0.35
 # 실측 잔차 중앙값 11~16px, 불량 프레임 43~155px로 확연히 갈린다.
 RESIDUAL_ABS_PX = 40.0
 RESIDUAL_MEDIAN_MULT = 3.0
+# 중앙값 배수에 상한을 둔다. **상한이 없으면 전부 나쁜 사람에게 아무것도 못 거른다** --
+# 한 사람의 오른팔은 잔차 중앙값이 73px(정상 11~16px)이라 문턱이 220px까지 벌어져,
+# 팔이 몸통으로 112px 처진 프레임(잔차 151px)이 정상으로 통과했다.
+RESIDUAL_CAP_PX = 80.0
+
+# 손목이 어깨보다 이만큼 아래면 팔이 몸통으로 처진 것으로 본다.
+# 이 데이터셋은 전원이 팔을 들고 서므로 처진 팔은 거의 항상 오검출이다.
+# 실측: 정상 12명 원본 검출의 92.7%가 '손목이 어깨 위'이고, 보존 후보 232개 중 60px
+# 넘게 처진 것은 2개(0.9%)뿐이며 그 둘도 최대 +175px로 명백한 오검출이었다.
+# 반면 문제 사례는 +112px인데 신뢰도가 0.80이라 신뢰도 검사를 그냥 통과했다.
+DROOP_MAX_PX = 60.0
 
 
 def collapsed_frames(kp: np.ndarray) -> set:
@@ -73,10 +84,22 @@ def collapsed_frames(kp: np.ndarray) -> set:
             if min(abs(kp[f, 7, 0] - kp[f, 8, 0]), abs(kp[f, 9, 0] - kp[f, 10, 0])) < thresh}
 
 
+def drooped_frames(kp, chain) -> set:
+    """손목이 어깨보다 크게 내려간 프레임 (팔이 몸통으로 처짐)."""
+    shoulder, _, wrist = chain
+    return {f for f in range(N_FRAMES)
+            if kp[f, wrist, 1] - kp[f, shoulder, 1] > DROOP_MAX_PX}
+
+
 def trusted_frames(kp, kp_conf, chain) -> list:
-    """신뢰도가 높고 두 팔이 겹치지 않은 프레임."""
+    """세 검사를 모두 통과한 프레임만 보존한다.
+
+    신뢰도 0.7 이상, 두 팔이 겹치지 않음, 팔이 몸통으로 처지지 않음.
+    **신뢰도만으로는 뒤의 둘을 못 거른다** -- 겹침은 신뢰도 0.7 이상 프레임의 30%에서,
+    처짐은 신뢰도 0.80에서도 나타났다.
+    """
     conf = kp_conf[:, list(chain)].min(axis=1)
-    bad = collapsed_frames(kp)
+    bad = collapsed_frames(kp) | drooped_frames(kp, chain)
     return [f for f in range(N_FRAMES) if conf[f] >= PRESERVE_CONF and f not in bad]
 
 
@@ -98,7 +121,8 @@ def verify_trusted(kp, kp_conf, chain, candidate) -> list:
     resid = {f: (np.linalg.norm(kp[f, elbow] - candidate[f, elbow])
                  + np.linalg.norm(kp[f, wrist] - candidate[f, wrist])) / 2
              for f in preserve}
-    limit = max(RESIDUAL_ABS_PX, RESIDUAL_MEDIAN_MULT * float(np.median(list(resid.values()))))
+    med = float(np.median(list(resid.values())))
+    limit = max(RESIDUAL_ABS_PX, min(RESIDUAL_MEDIAN_MULT * med, RESIDUAL_CAP_PX))
     kept = [f for f in preserve if resid[f] <= limit]
     return kept if len(kept) >= 4 else preserve   # 너무 많이 버리면 판정 자체를 못 믿는다
 
